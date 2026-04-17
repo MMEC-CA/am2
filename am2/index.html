@@ -35,6 +35,10 @@
     var GRAV_ACCEL = -1470;
     var FRICTION = 0.88;    // per-frame decay
     var MARBLE_RADIUS = 8;
+    var TABLE_MAX_WIDTH = 1600;
+    var TABLE_MAX_HEIGHT = 900;
+    var TABLE_MIN_WIDTH = 600;
+    var TABLE_MIN_HEIGHT = 340;
     var TABLE_WIDTH = 1600;
     var TABLE_HEIGHT = 900;
     var TABLE_LEFT = (GW - TABLE_WIDTH) / 2;
@@ -537,12 +541,12 @@
       
       // Title
       ctx.fillStyle = '#0ff';
-      ctx.font = 'bold 60px monospace';
+      ctx.font = 'bold ' + Math.max(32, Math.min(60, GW / 32)) + 'px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('MARBLE SADNESS', GW / 2, 80);
+      ctx.fillText('MARBLE SADNESS', GW / 2, Math.max(60, GH * 0.07));
       
       // Level chooser
-      ctx.font = 'bold 32px monospace';
+      ctx.font = 'bold ' + Math.max(18, Math.min(32, GW / 60)) + 'px monospace';
       ctx.fillStyle = selectedLevel > 1 ? '#fff' : '#444';
       ctx.fillText('<', GW * 0.35, 150);
       ctx.fillStyle = '#0ff';
@@ -551,10 +555,13 @@
       ctx.fillText('>', GW * 0.65, 150);
       
       // Slot grid (3x4)
-      var slotW = 280, slotH = 180;
-      var startX = (GW - slotW * 4) / 2;
-      var startY = 280;
-      for (var i = 0; i < 12; i++) {
+      var cols = 4;
+      var rows = 3;
+      var slotW = Math.min(280, Math.max(160, (GW - 120) / cols));
+      var slotH = Math.min(180, Math.max(120, (GH - 260) / rows));
+      var startX = (GW - slotW * cols) / 2;
+      var startY = Math.max(220, GH * 0.25);
+      for (var i = 0; i < cols * rows; i++) {
         var col = i % 4;
         var row = Math.floor(i / 4);
         var sx = startX + col * slotW;
@@ -595,7 +602,7 @@
       
       // Instructions
       ctx.fillStyle = '#888';
-      ctx.font = '16px monospace';
+      ctx.font = Math.max(12, Math.min(18, GW / 70)) + 'px monospace';
       ctx.textAlign = 'center';
       ctx.fillText('Hold SPACE or TAP to ready up', GW / 2, GH - 40);
       if (holdingFlap && mySlotIndex < 0) {
@@ -1062,6 +1069,12 @@
     function resizeCanvas() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
+      GW = canvas.width;
+      GH = canvas.height;
+      TABLE_WIDTH = Math.max(TABLE_MIN_WIDTH, Math.min(TABLE_MAX_WIDTH, GW - 120));
+      TABLE_HEIGHT = Math.max(TABLE_MIN_HEIGHT, Math.min(TABLE_MAX_HEIGHT, GH - 180));
+      TABLE_LEFT = (GW - TABLE_WIDTH) / 2;
+      TABLE_TOP = (GH - TABLE_HEIGHT) / 2;
     }
 
     function gameLoop(now) {
