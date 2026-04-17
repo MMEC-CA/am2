@@ -85,6 +85,11 @@
     var myDeviceInfo = getDeviceInfo();
     var isHost = false;
     var hostPeerId = null;
+    var holdProgress = 0;
+    var holdProgressP2 = 0;
+    var PLAYER_ACCEL = 1800;
+    var MAX_PLAYER_SPEED = 1200;
+    var AI_MARBLES = 3;
 
     // Lobby slots
     var slots = [];
@@ -101,7 +106,6 @@
     // Input
     var keys = { l: false, r: false, u: false, d: false };
     var keys2 = { l: false, r: false, u: false, d: false };
-    var mySlotIndex = -1;
     var hasLocalPlayer2 = false;
     var localPlayer2PeerId = null;
     var localPlayer2SlotIndex = -1;
@@ -206,6 +210,115 @@
       ctx.stroke();
     };
 
+    function createMarble(peerId, color, slotIndex, isAI) {
+      var m = new Marble(peerId, color, slotIndex);
+      m.isAI = !!isAI;
+      m.aiTimer = 0;
+      m.aiTarget = null;
+      return m;
+    }
+
+    function setupGameMarbles(defs) {
+      gameMarbles = [];
+      playerMarbles = {};
+      playerLives = {};
+      defs.forEach(function(d) {
+        var m = createMarble(d.peerId, d.color, d.slotIndex, d.isAI);
+        gameMarbles.push(m);
+        if (!m.isAI) playerMarbles[m.peerId] = m;
+        playerLives[m.peerId] = true;
+      });
+    }
+
+    function applyPlayerControl(m, dt) {
+      if (!m.alive) return;
+      var localKeys = null;
+      if (m.peerId === myPeerId) {
+        localKeys = (p1Side === 'arrows') ? keys : keys2;
+      } else if (m.peerId === localPlayer2PeerId) {
+        localKeys = keys2;
+      }
+      if (!localKeys) return;
+      var ax = 0, ay = 0;
+      if (localKeys.l) ax -= PLAYER_ACCEL;
+      if (localKeys.r) ax += PLAYER_ACCEL;
+      if (localKeys.u) ay -= PLAYER_ACCEL;
+      if (localKeys.d) ay += PLAYER_ACCEL;
+      m.vx += ax * dt;
+      m.vy += ay * dt;
+      var speed = Math.hypot(m.vx, m.vy);
+      if (speed > MAX_PLAYER_SPEED) {
+        var scale = MAX_PLAYER_SPEED / speed;
+        m.vx *= scale;
+        m.vy *= scale;
+      }
+    }
+
+    function updateAI(m, dt) {
+      if (!m.alive) return;
+      m.aiTimer -= dt;
+      if (m.aiTimer <= 0 || !m.aiTarget || !m.aiTarget.alive) {
+        var targets = gameMarbles.filter(function(other) {
+          return other.alive && !other.isAI && other !== m;
+        });
+        if (!targets.length) {
+          targets = gameMarbles.filter(function(other) {
+            return other.alive && other !== m;
+          });
+        }
+        if (targets.length) {
+          m.aiTarget = targets[Math.floor(Math.random() * targets.length)];
+        }
+        m.aiTimer = 0.4 + Math.random() * 0.6;
+      }
+      if (m.aiTarget) {
+        var dx = m.aiTarget.x - m.x;
+        var dy = m.aiTarget.y - m.y;
+        var dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        var strength = 1600;
+        m.vx += (dx / dist) * strength * dt;
+        m.vy += (dy / dist) * strength * dt;
+      }
+    }
+
+    function resolveMarbleCollisions() {
+      for (var i = 0; i < gameMarbles.length; i++) {
+        var a = gameMarbles[i];
+        if (!a.alive) continue;
+        for (var j = i + 1; j < gameMarbles.length; j++) {
+          var b = gameMarbles[j];
+          if (!b.alive) continue;
+          var dx = b.x - a.x;
+          var dy = b.y - a.y;
+          var dist = Math.sqrt(dx * dx + dy * dy);
+          var minDist = a.radius + b.radius;
+          if (dist <= 0) {
+            dx = 1;
+            dy = 0;
+            dist = 1;
+          }
+          if (dist < minDist) {
+            var overlap = (minDist - dist) * 0.5;
+            var nx = dx / dist;
+            var ny = dy / dist;
+            a.x -= nx * overlap;
+            a.y -= ny * overlap;
+            b.x += nx * overlap;
+            b.y += ny * overlap;
+            var relVel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+            if (relVel > 0) continue;
+            var impulse = -(1.0 + 0.8) * relVel * 0.5;
+            var ix = impulse * nx;
+            var iy = impulse * ny;
+            a.vx -= ix;
+            a.vy -= iy;
+            b.vx += ix;
+            b.vy += iy;
+          }
+        }
+      }
+    }
+
     // ============================================================
     // LOBBY STATE
     // ============================================================
@@ -267,7 +380,11 @@
       if (lobbyState !== 'lobby' || !holdingFlap) return;
       var elapsed = (performance.now() - holdStartTime) / 1000;
       var progress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
-      if (mySlotIndex >= 0) slots[mySlotIndex].progress = progress;
+      if (mySlotIndex >= 0) {
+        slots[mySlotIndex].progress = progress;
+      } else {
+        holdProgress = progress;
+      }
       if (elapsed >= HOLD_DURATION) {
         holdingFlap = false;
         claimSlot();
@@ -276,12 +393,12 @@
     function releaseHold() {
       if (mySlotIndex >= 0) {
         slots[mySlotIndex].ready = true;
+        slots[mySlotIndex].progress = 100;
         broadcast({ type: 'lobby-ready', peerId: myPeerId });
         checkCountdownStart();
-      } else {
-        holdingFlap = false;
-        if (mySlotIndex >= 0) slots[mySlotIndex].progress = 0;
       }
+      holdingFlap = false;
+      holdProgress = 0;
     }
 
     var holdingFlapP2 = false, holdStartTimeP2 = 0;
@@ -351,28 +468,44 @@
       cfg = makeLevel(msg.level);
       gameTime = 0;
       lastTime = 0;
-      gameMarbles = [];
-      playerMarbles = {};
-      playerLives = {};
 
-      // Create marble for each ready player
-      for (var i = 0; i < 12; i++) {
-        if (slots[i].peerId !== null && slots[i].ready) {
-          var m = new Marble(slots[i].peerId, SLOT_COLORS[i].hex, i);
-          gameMarbles.push(m);
-          playerMarbles[slots[i].peerId] = m;
-          playerLives[slots[i].peerId] = true;
+      var initialMarbles = [];
+      if (msg.marbles && msg.marbles.length) {
+        initialMarbles = msg.marbles.slice();
+      } else {
+        for (var i = 0; i < 12; i++) {
+          if (slots[i].peerId !== null && slots[i].ready) {
+            initialMarbles.push({
+              peerId: slots[i].peerId,
+              color: SLOT_COLORS[i].hex,
+              slotIndex: i,
+              isAI: false
+            });
+          }
         }
       }
+
+      if (isHost) {
+        var humanCount = initialMarbles.filter(function(m) { return !m.isAI; }).length;
+        var aiCount = Math.max(0, AI_MARBLES - humanCount);
+        for (var j = 0; j < aiCount; j++) {
+          initialMarbles.push({
+            peerId: 'AI-' + j + '-' + Date.now(),
+            color: '#999',
+            slotIndex: 11 - j,
+            isAI: true
+          });
+        }
+      }
+
+      setupGameMarbles(initialMarbles);
 
       if (isHost) {
         broadcast({
           type: 'game-start',
           level: msg.level,
           hostPeerId: myPeerId,
-          playerSlots: slots.map(function(s, i) {
-            return { peerId: s.peerId, slotIndex: i, ready: s.ready };
-          }).filter(function(p) { return p.peerId !== null; })
+          marbles: initialMarbles
         });
       }
       playTone(440, 0.1, 0.2);
@@ -465,6 +598,13 @@
       ctx.font = '16px monospace';
       ctx.textAlign = 'center';
       ctx.fillText('Hold SPACE or TAP to ready up', GW / 2, GH - 40);
+      if (holdingFlap && mySlotIndex < 0) {
+        ctx.fillStyle = '#0f0';
+        ctx.fillRect(GW / 2 - 180, GH - 30, 360 * holdProgress / 100, 16);
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(GW / 2 - 180, GH - 30, 360, 16);
+      }
     }
 
     function renderGame() {
@@ -761,7 +901,8 @@
         }
       }
       else if (msg.type === 'game-start') {
-        if (lobbyState !== 'observer') startGame(msg);
+        hostPeerId = msg.hostPeerId || hostPeerId;
+        if (lobbyState !== 'observer' && lobbyState !== 'game') startGame(msg);
       }
       else if (msg.type === 'state') {
         if (!isHost) {
@@ -769,13 +910,16 @@
           if (msg.marbles) {
             for (var i = 0; i < msg.marbles.length; i++) {
               var ms = msg.marbles[i];
-              var m = playerMarbles[ms.peerId];
-              if (m) {
-                m.x = ms.x;
-                m.y = ms.y;
-                m.vx = ms.vx;
-                m.vy = ms.vy;
-                m.alive = ms.alive;
+              for (var j = 0; j < gameMarbles.length; j++) {
+                var m = gameMarbles[j];
+                if (m.peerId === ms.peerId) {
+                  m.x = ms.x;
+                  m.y = ms.y;
+                  m.vx = ms.vx;
+                  m.vy = ms.vy;
+                  m.alive = ms.alive;
+                  break;
+                }
               }
             }
           }
@@ -937,10 +1081,21 @@
       } else if (lobbyState === 'game') {
         gameTime += dt;
 
+        for (var i = 0; i < gameMarbles.length; i++) {
+          var marble = gameMarbles[i];
+          if (marble.isAI) {
+            updateAI(marble, dt);
+          } else {
+            applyPlayerControl(marble, dt);
+          }
+        }
+
         // Physics update
         for (var i = 0; i < gameMarbles.length; i++) {
           gameMarbles[i].update(dt, cfg);
         }
+
+        resolveMarbleCollisions();
 
         // Host broadcasts state occasionally
         if (isHost && Math.random() < 0.05) {
