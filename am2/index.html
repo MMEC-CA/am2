@@ -1079,8 +1079,8 @@
       if (dt < 0.001) dt = 0.001;
 
       if (lobbyState === 'lobby') {
-        updateHold(dt);
-        updateHoldP2(dt);
+        updateHoldLeft(dt);
+        updateHoldRight(dt);
         renderLobby();
       } else if (lobbyState === 'countdown') {
         updateCountdown(dt);
