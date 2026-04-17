@@ -1,11 +1,978 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>am2</title>
-  </head>
-  <body>
-    <p>am2</p>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Marble Sadness</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+    canvas { display: block; }
+    #hud { position: fixed; top: 8px; left: 8px; color: #aaa; font-family: monospace; font-size: 12px; pointer-events: none; z-index: 10; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+</head>
+<body>
+  <div id="hud"></div>
+  <canvas id="game"></canvas>
+  <script>
+    // ============================================================
+    // MARBLE SADNESS - Multiplayer Marble Rolling Game
+    // ============================================================
+    // Lobby: 12 color slots, level chooser (table tilt angles)
+    // Game: Marbles roll on tilting table surface
+    //   - Gravity pulls marbles off table
+    //   - Last marble on table wins
+    //   - WASD + Arrow keys for 2-player local play
+    //   - WebRTC for LAN multiplayer
+    // ============================================================
+
+    var BUILD = 'v2026-04-17-ms1';
+    var GW = 1920, GH = 1080;
+
+    // Physics constants
+    var GRAV_ACCEL = -1470;
+    var FRICTION = 0.88;    // per-frame decay
+    var MARBLE_RADIUS = 8;
+    var TABLE_WIDTH = 1600;
+    var TABLE_HEIGHT = 900;
+    var TABLE_LEFT = (GW - TABLE_WIDTH) / 2;
+    var TABLE_TOP = (GH - TABLE_HEIGHT) / 2;
+
+    var SLOT_COLORS = [
+      { hex: '#ff0000', name: 'Red' },
+      { hex: '#00ff00', name: 'Lime' },
+      { hex: '#0000ff', name: 'Blue' },
+      { hex: '#ffff00', name: 'Yellow' },
+      { hex: '#ff00ff', name: 'Magenta' },
+      { hex: '#00ffff', name: 'Cyan' },
+      { hex: '#ff8800', name: 'Orange' },
+      { hex: '#ff0088', name: 'Pink' },
+      { hex: '#8800ff', name: 'Purple' },
+      { hex: '#88ff00', name: 'Lime2' },
+      { hex: '#00ff88', name: 'Mint' },
+      { hex: '#ffff88', name: 'LtYellow' }
+    ];
+
+    // Lobby state
+    var lobbyState = 'lobby'; // 'lobby', 'countdown', 'game', 'gameover', 'observer'
+    var selectedLevel = 1;   // affects table tilt angle
+    var countdownTimer = 0;
+    var countdownStart = 0;
+    var COUNTDOWN_DURATION = 3.0;
+
+    // Networking
+    var sigSocket = null;
+    var sigReconnectTimer = null;
+    var peerConnections = {};
+    var dataChannels = {};
+    var pendingCandidates = {};
+    var connectedPeerIds = {};
+
+    // Game state
+    var gameTime = 0, lastTime = 0;
+    var gameMarbles = [];     // all marbles in game
+    var playerMarbles = {};   // peerId -> marble
+    var playerLives = {};     // peerId -> alive (true/false)
+    var cfg = null;           // current level config
+
+    // Timing
+    var gameOverTime = 0;
+    var GAME_OVER_LOCKOUT = 5.0;
+    var myPeerId = crypto.randomUUID().slice(0, 8);
+    var mySlotIndex = -1;
+    var myDeviceInfo = getDeviceInfo();
+    var isHost = false;
+    var hostPeerId = null;
+
+    // Lobby slots
+    var slots = [];
+    for (var i = 0; i < 12; i++) {
+      slots.push({
+        peerId: null,
+        deviceInfo: '',
+        progress: 0,
+        ready: false,
+        holding: false
+      });
+    }
+
+    // Input
+    var keys = { l: false, r: false, u: false, d: false };
+    var keys2 = { l: false, r: false, u: false, d: false };
+    var mySlotIndex = -1;
+    var hasLocalPlayer2 = false;
+    var localPlayer2PeerId = null;
+    var localPlayer2SlotIndex = -1;
+    var p1Side = null;  // 'arrows' or 'wasd'
+
+    var canvas = document.getElementById('game');
+    var ctx = canvas.getContext('2d');
+    var hud = document.getElementById('hud');
+
+    // ============================================================
+    // AUDIO
+    // ============================================================
+    var audioCtx = null;
+    function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    function playTone(freq, dur, vol, type) {
+      if (!audioCtx) return;
+      var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = type || 'sine'; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol || 0.3, audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + dur);
+    }
+
+    // ============================================================
+    // UTILITY
+    // ============================================================
+    function getDeviceInfo() {
+      var ua = navigator.userAgent;
+      if (/iPhone/.test(ua)) return 'iPhone (touch)';
+      if (/iPad/.test(ua)) return 'iPad (touch)';
+      if (/Android/.test(ua)) {
+        if (/Mobile/.test(ua)) return 'Android (touch)';
+        return 'Android tablet (touch)';
+      }
+      if (/Mac/.test(ua)) return 'Mac (↔ + WASD)';
+      if (/Windows/.test(ua)) return 'Windows (↔ + WASD)';
+      if (/Linux/.test(ua)) return 'Linux (↔ + WASD)';
+      return 'Desktop (↔ + WASD)';
+    }
+
+    function makeLevel(lv) {
+      var tilt = Math.min(20, lv * 0.5);  // table tilt angle in degrees
+      return {
+        level: lv,
+        tilt: tilt,
+        tiltRad: tilt * Math.PI / 180,
+        gravity: Math.sin(tilt * Math.PI / 180) * 9.8 * 100,
+        friction: 0.92 - lv * 0.002  // harder levels: more slippery
+      };
+    }
+
+    // ============================================================
+    // MARBLE PHYSICS
+    // ============================================================
+    function Marble(peerId, color, slotIndex) {
+      this.peerId = peerId;
+      this.color = color;
+      this.slotIndex = slotIndex;
+      this.x = TABLE_LEFT + TABLE_WIDTH * 0.5 + (Math.random() - 0.5) * 200;
+      this.y = TABLE_TOP + TABLE_HEIGHT * 0.3;
+      this.vx = 0;
+      this.vy = 0;
+      this.alive = true;
+      this.radius = MARBLE_RADIUS;
+    }
+    Marble.prototype.update = function(dt, cfgData) {
+      if (!this.alive) return;
+      
+      // Apply gravity in direction of table tilt
+      var ax = Math.sin(cfgData.tiltRad) * 1500;
+      var ay = Math.cos(cfgData.tiltRad) * GRAV_ACCEL;
+      
+      this.vx += ax * dt;
+      this.vy += ay * dt;
+      
+      // Apply friction
+      this.vx *= cfgData.friction;
+      this.vy *= cfgData.friction;
+      
+      // Update position
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+      
+      // Check if marble fell off table
+      if (this.x < TABLE_LEFT - this.radius * 2 || 
+          this.x > TABLE_LEFT + TABLE_WIDTH + this.radius * 2 ||
+          this.y < TABLE_TOP - this.radius * 2 ||
+          this.y > TABLE_TOP + TABLE_HEIGHT + this.radius * 2) {
+        this.alive = false;
+        playTone(200, 0.1, 0.2);
+      }
+    };
+    Marble.prototype.render = function() {
+      if (!this.alive) return;
+      ctx.fillStyle = this.color;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    };
+
+    // ============================================================
+    // LOBBY STATE
+    // ============================================================
+    function findSlotByPeer(peerId) {
+      for (var i = 0; i < 12; i++) {
+        if (slots[i].peerId === peerId) return i;
+      }
+      return -1;
+    }
+
+    function claimSlot() {
+      if (mySlotIndex >= 0) return;
+      for (var i = 0; i < 12; i++) {
+        if (slots[i].peerId === null) {
+          mySlotIndex = i;
+          slots[i].peerId = myPeerId;
+          slots[i].deviceInfo = myDeviceInfo;
+          broadcast({
+            type: 'lobby-join',
+            peerId: myPeerId,
+            slotIndex: mySlotIndex,
+            deviceInfo: myDeviceInfo
+          });
+          determineHost();
+          return;
+        }
+      }
+    }
+
+    function claimLocalPlayer2() {
+      if (hasLocalPlayer2) return;
+      if (!(/Mac|Win|Linux/.test(navigator.userAgent))) return;
+      for (var i = 0; i < 12; i++) {
+        if (slots[i].peerId === null) {
+          localPlayer2PeerId = myPeerId + '-p2';
+          localPlayer2SlotIndex = i;
+          hasLocalPlayer2 = true;
+          slots[i].peerId = localPlayer2PeerId;
+          slots[i].deviceInfo = 'WASD (local)';
+          broadcast({
+            type: 'lobby-join',
+            peerId: localPlayer2PeerId,
+            slotIndex: localPlayer2SlotIndex,
+            deviceInfo: 'WASD (local)'
+          });
+          return;
+        }
+      }
+    }
+
+    var holdingFlap = false, holdStartTime = 0;
+    var HOLD_DURATION = 3.0;
+    function startHold() {
+      if (lobbyState !== 'lobby' || mySlotIndex >= 0) return;
+      holdingFlap = true;
+      holdStartTime = performance.now();
+    }
+    function updateHold(dt) {
+      if (lobbyState !== 'lobby' || !holdingFlap) return;
+      var elapsed = (performance.now() - holdStartTime) / 1000;
+      var progress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
+      if (mySlotIndex >= 0) slots[mySlotIndex].progress = progress;
+      if (elapsed >= HOLD_DURATION) {
+        holdingFlap = false;
+        claimSlot();
+      }
+    }
+    function releaseHold() {
+      if (mySlotIndex >= 0) {
+        slots[mySlotIndex].ready = true;
+        broadcast({ type: 'lobby-ready', peerId: myPeerId });
+        checkCountdownStart();
+      } else {
+        holdingFlap = false;
+        if (mySlotIndex >= 0) slots[mySlotIndex].progress = 0;
+      }
+    }
+
+    var holdingFlapP2 = false, holdStartTimeP2 = 0;
+    function startHoldP2() {
+      if (lobbyState !== 'lobby' || mySlotIndex < 0) return;
+      if (!hasLocalPlayer2) claimLocalPlayer2();
+      if (!hasLocalPlayer2) return;
+      holdingFlapP2 = true;
+      holdStartTimeP2 = performance.now();
+    }
+    function updateHoldP2(dt) {
+      if (lobbyState !== 'lobby' || !holdingFlapP2 || !hasLocalPlayer2) return;
+      var elapsed = (performance.now() - holdStartTimeP2) / 1000;
+      var progress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
+      slots[localPlayer2SlotIndex].progress = progress;
+      if (elapsed >= HOLD_DURATION) {
+        holdingFlapP2 = false;
+        slots[localPlayer2SlotIndex].ready = true;
+        broadcast({ type: 'lobby-ready', peerId: localPlayer2PeerId });
+        checkCountdownStart();
+      }
+    }
+    function releaseHoldP2() {
+      holdingFlapP2 = false;
+      if (localPlayer2SlotIndex >= 0) slots[localPlayer2SlotIndex].progress = 0;
+    }
+
+    function checkCountdownStart() {
+      if (lobbyState !== 'lobby') return;
+      var anyReady = false;
+      for (var i = 0; i < 12; i++) {
+        if (slots[i].ready) { anyReady = true; break; }
+      }
+      if (anyReady) {
+        lobbyState = 'countdown';
+        countdownStart = performance.now();
+        countdownTimer = COUNTDOWN_DURATION;
+      }
+    }
+
+    function updateCountdown(dt) {
+      if (lobbyState !== 'countdown') return;
+      countdownTimer -= dt;
+      if (countdownTimer <= 0) {
+        startGame({ level: selectedLevel });
+      }
+    }
+
+    function determineHost() {
+      var lowestPeer = null;
+      for (var i = 0; i < 12; i++) {
+        if (slots[i].peerId !== null) {
+          if (!lowestPeer || slots[i].peerId < lowestPeer) {
+            lowestPeer = slots[i].peerId;
+          }
+        }
+      }
+      isHost = (lowestPeer === myPeerId);
+      hostPeerId = lowestPeer;
+    }
+
+    // ============================================================
+    // GAME LOGIC
+    // ============================================================
+    function startGame(msg) {
+      lobbyState = 'game';
+      cfg = makeLevel(msg.level);
+      gameTime = 0;
+      lastTime = 0;
+      gameMarbles = [];
+      playerMarbles = {};
+      playerLives = {};
+
+      // Create marble for each ready player
+      for (var i = 0; i < 12; i++) {
+        if (slots[i].peerId !== null && slots[i].ready) {
+          var m = new Marble(slots[i].peerId, SLOT_COLORS[i].hex, i);
+          gameMarbles.push(m);
+          playerMarbles[slots[i].peerId] = m;
+          playerLives[slots[i].peerId] = true;
+        }
+      }
+
+      if (isHost) {
+        broadcast({
+          type: 'game-start',
+          level: msg.level,
+          hostPeerId: myPeerId,
+          playerSlots: slots.map(function(s, i) {
+            return { peerId: s.peerId, slotIndex: i, ready: s.ready };
+          }).filter(function(p) { return p.peerId !== null; })
+        });
+      }
+      playTone(440, 0.1, 0.2);
+    }
+
+    function checkGameOver() {
+      if (lobbyState !== 'game') return;
+      var aliveMarbles = gameMarbles.filter(function(m) { return m.alive; });
+      if (aliveMarbles.length <= 1) {
+        lobbyState = 'gameover';
+        gameOverTime = performance.now() / 1000;
+        if (aliveMarbles.length === 1) {
+          playTone(880, 0.2, 0.3);
+          setTimeout(function() { playTone(1047, 0.2, 0.3); }, 150);
+        } else {
+          playTone(200, 0.2, 0.2);
+        }
+        var winnerPeerId = aliveMarbles.length === 1 ? aliveMarbles[0].peerId : null;
+        broadcast({ type: 'gameover', winnerPeerId: winnerPeerId });
+      }
+    }
+
+    // ============================================================
+    // RENDERING
+    // ============================================================
+    function renderLobby() {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, GW, GH);
+      
+      // Title
+      ctx.fillStyle = '#0ff';
+      ctx.font = 'bold 60px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('MARBLE SADNESS', GW / 2, 80);
+      
+      // Level chooser
+      ctx.font = 'bold 32px monospace';
+      ctx.fillStyle = selectedLevel > 1 ? '#fff' : '#444';
+      ctx.fillText('<', GW * 0.35, 150);
+      ctx.fillStyle = '#0ff';
+      ctx.fillText('Level ' + selectedLevel, GW / 2, 150);
+      ctx.fillStyle = selectedLevel < 100 ? '#fff' : '#444';
+      ctx.fillText('>', GW * 0.65, 150);
+      
+      // Slot grid (3x4)
+      var slotW = 280, slotH = 180;
+      var startX = (GW - slotW * 4) / 2;
+      var startY = 280;
+      for (var i = 0; i < 12; i++) {
+        var col = i % 4;
+        var row = Math.floor(i / 4);
+        var sx = startX + col * slotW;
+        var sy = startY + row * slotH;
+        var slot = slots[i];
+        
+        // Background
+        ctx.fillStyle = slot.peerId ? SLOT_COLORS[i].hex : '#222';
+        ctx.globalAlpha = 0.3;
+        ctx.fillRect(sx, sy, slotW - 10, slotH - 10);
+        ctx.globalAlpha = 1;
+        
+        // Border
+        ctx.strokeStyle = slot.ready ? '#0f0' : '#888';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx, sy, slotW - 10, slotH - 10);
+        
+        // Ready progress bar
+        if (slot.progress > 0) {
+          ctx.fillStyle = '#0f0';
+          ctx.fillRect(sx + 5, sy + slotH - 25, (slotW - 20) * slot.progress / 100, 15);
+        }
+        
+        // Info
+        ctx.fillStyle = '#fff';
+        ctx.font = '14px monospace';
+        ctx.textAlign = 'left';
+        if (slot.peerId) {
+          ctx.fillText(SLOT_COLORS[i].name, sx + 10, sy + 30);
+          ctx.fillStyle = '#aaa';
+          ctx.font = '12px monospace';
+          ctx.fillText(slot.deviceInfo.substring(0, 20), sx + 10, sy + 50);
+        } else {
+          ctx.fillStyle = '#666';
+          ctx.fillText('[empty]', sx + 10, sy + 30);
+        }
+      }
+      
+      // Instructions
+      ctx.fillStyle = '#888';
+      ctx.font = '16px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Hold SPACE or TAP to ready up', GW / 2, GH - 40);
+    }
+
+    function renderGame() {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, GW, GH);
+      
+      // Draw table
+      ctx.save();
+      ctx.translate(TABLE_LEFT + TABLE_WIDTH / 2, TABLE_TOP + TABLE_HEIGHT / 2);
+      ctx.rotate(cfg.tiltRad);
+      ctx.translate(-(TABLE_WIDTH / 2), -(TABLE_HEIGHT / 2));
+      ctx.fillStyle = '#4a4a2a';
+      ctx.fillRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+      ctx.restore();
+      
+      // Draw marbles
+      for (var i = 0; i < gameMarbles.length; i++) {
+        gameMarbles[i].render();
+      }
+      
+      // HUD
+      ctx.fillStyle = '#0ff';
+      ctx.font = 'bold 24px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText('Time: ' + gameTime.toFixed(1) + 's', 20, 40);
+      
+      var aliveCount = gameMarbles.filter(function(m) { return m.alive; }).length;
+      ctx.fillText('Marbles left: ' + aliveCount, 20, 70);
+    }
+
+    function renderGameOver() {
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0, 0, GW, GH);
+      
+      var aliveMarbles = gameMarbles.filter(function(m) { return m.alive; });
+      var winner = aliveMarbles.length === 1 ? aliveMarbles[0] : null;
+      
+      ctx.fillStyle = '#0ff';
+      ctx.font = 'bold 80px monospace';
+      ctx.textAlign = 'center';
+      if (winner) {
+        ctx.fillText('WINNER!', GW / 2, GH / 2 - 50);
+        ctx.fillStyle = winner.color;
+        ctx.fillText('Marble', GW / 2, GH / 2 + 50);
+      } else {
+        ctx.fillText('TIE!', GW / 2, GH / 2);
+      }
+      
+      ctx.fillStyle = '#888';
+      ctx.font = '24px monospace';
+      if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
+        ctx.fillText('SPACE to return to lobby', GW / 2, GH / 2 + 150);
+      }
+    }
+
+    // ============================================================
+    // NETWORKING
+    // ============================================================
+    var MAX_BUFFER = 16384;
+    function broadcast(msg) {
+      var data = JSON.stringify(msg);
+      for (var pid in dataChannels) {
+        var dc = dataChannels[pid];
+        if (dc && dc.readyState === 'open' && dc.bufferedAmount < MAX_BUFFER) {
+          dc.send(data);
+        }
+      }
+    }
+
+    function sendToPeer(peerId, msg) {
+      var dc = dataChannels[peerId];
+      if (dc && dc.readyState === 'open' && dc.bufferedAmount < MAX_BUFFER) {
+        dc.send(JSON.stringify(msg));
+      }
+    }
+
+    function serializeSlots() {
+      var out = [];
+      for (var i = 0; i < 12; i++) {
+        out.push({
+          peerId: slots[i].peerId,
+          deviceInfo: slots[i].deviceInfo,
+          progress: slots[i].progress,
+          ready: slots[i].ready,
+          holding: slots[i].holding
+        });
+      }
+      return out;
+    }
+
+    function handleSignalingMessage(msg) {
+      if (msg.type === 'peers') {
+        // Initial peer list
+        var peers = msg.peers || [];
+        for (var i = 0; i < peers.length; i++) {
+          initiateConnection(peers[i]);
+        }
+      } else if (msg.type === 'peer-joined') {
+        initiateConnection(msg.peerId);
+      } else if (msg.type === 'offer') {
+        handleOffer(msg.peerId, msg.offer);
+      } else if (msg.type === 'answer') {
+        handleAnswer(msg.peerId, msg.answer);
+      } else if (msg.type === 'candidate') {
+        handleCandidate(msg.peerId, msg.candidate);
+      } else if (msg.type === 'peer-left') {
+        handlePeerLeft(msg.peerId);
+      }
+    }
+
+    function initiateConnection(peerId) {
+      if (peerConnections[peerId]) return;
+      var pc = new RTCPeerConnection({
+        iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }]
+      });
+      peerConnections[peerId] = pc;
+      pendingCandidates[peerId] = [];
+
+      pc.onicecandidate = function(e) {
+        if (e.candidate) {
+          sendSignal(peerId, { type: 'candidate', peerId: myPeerId, candidate: e.candidate });
+        }
+      };
+
+      pc.ondatachannel = function(e) {
+        setupDataChannel(e.channel, peerId);
+      };
+
+      var dc = pc.createDataChannel('game', { ordered: true });
+      setupDataChannel(dc, peerId);
+      pc.createOffer().then(function(offer) {
+        return pc.setLocalDescription(offer);
+      }).then(function() {
+        sendSignal(peerId, pc.localDescription);
+      });
+    }
+
+    function handleOffer(peerId, offer) {
+      if (peerConnections[peerId]) return;
+      var pc = new RTCPeerConnection({
+        iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }]
+      });
+      peerConnections[peerId] = pc;
+      pendingCandidates[peerId] = [];
+
+      pc.onicecandidate = function(e) {
+        if (e.candidate) {
+          sendSignal(peerId, { type: 'candidate', peerId: myPeerId, candidate: e.candidate });
+        }
+      };
+
+      pc.ondatachannel = function(e) {
+        setupDataChannel(e.channel, peerId);
+      };
+
+      pc.setRemoteDescription(new RTCSessionDescription(offer)).then(function() {
+        return pc.createAnswer();
+      }).then(function(answer) {
+        return pc.setLocalDescription(answer);
+      }).then(function() {
+        sendSignal(peerId, pc.localDescription);
+      });
+    }
+
+    function handleAnswer(peerId, answer) {
+      var pc = peerConnections[peerId];
+      if (!pc) return;
+      pc.setRemoteDescription(new RTCSessionDescription(answer));
+    }
+
+    function handleCandidate(peerId, candidate) {
+      var pc = peerConnections[peerId];
+      if (!pc) return;
+      if (pc.remoteDescription && pc.remoteDescription.type) {
+        pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } else {
+        pendingCandidates[peerId].push(candidate);
+      }
+    }
+
+    function handlePeerLeft(peerId) {
+      if (peerConnections[peerId]) {
+        peerConnections[peerId].close();
+        delete peerConnections[peerId];
+      }
+      delete dataChannels[peerId];
+      delete connectedPeerIds[peerId];
+
+      var si = findSlotByPeer(peerId);
+      if (si >= 0) {
+        slots[si].peerId = null;
+        slots[si].ready = false;
+        slots[si].progress = 0;
+        slots[si].holding = false;
+      }
+
+      determineHost();
+      var peerCount = 0;
+      for (var p in connectedPeerIds) peerCount++;
+      if (peerCount === 0 && (lobbyState === 'game' || lobbyState === 'observer' || lobbyState === 'gameover')) {
+        lobbyState = 'lobby';
+        mySlotIndex = -1;
+        cfg = null;
+        for (var i = 0; i < 12; i++) {
+          slots[i].peerId = null;
+          slots[i].ready = false;
+          slots[i].progress = 0;
+          slots[i].holding = false;
+        }
+      }
+    }
+
+    function setupDataChannel(dc, peerId) {
+      function onChannelReady() {
+        dataChannels[peerId] = dc;
+        connectedPeerIds[peerId] = true;
+        console.log('Data channel open with', peerId);
+        
+        sendToPeer(peerId, {
+          type: 'lobby-join',
+          peerId: myPeerId,
+          slotIndex: mySlotIndex,
+          deviceInfo: myDeviceInfo
+        });
+
+        if (mySlotIndex >= 0) {
+          sendToPeer(peerId, {
+            type: 'lobby-sync',
+            slots: serializeSlots(),
+            level: selectedLevel,
+            lobbyState: lobbyState
+          });
+        }
+      }
+
+      if (dc.readyState === 'open') onChannelReady();
+      else dc.onopen = onChannelReady;
+
+      dc.onmessage = function(e) {
+        try {
+          var msg = JSON.parse(e.data);
+          handleDataMessage(msg);
+        } catch (err) {
+          console.error('Bad data message:', err);
+        }
+      };
+
+      dc.onclose = function() {
+        delete dataChannels[peerId];
+      };
+    }
+
+    function handleDataMessage(msg) {
+      if (msg.type === 'lobby-join') {
+        var si = findSlotByPeer(msg.peerId);
+        if (si < 0 && msg.slotIndex !== undefined) {
+          si = msg.slotIndex;
+        }
+        if (si < 0) {
+          for (var i = 0; i < 12; i++) {
+            if (slots[i].peerId === null) { si = i; break; }
+          }
+        }
+        if (si >= 0) {
+          slots[si].peerId = msg.peerId;
+          slots[si].deviceInfo = msg.deviceInfo;
+        }
+        determineHost();
+      }
+      else if (msg.type === 'lobby-sync') {
+        for (var i = 0; i < (msg.slots || []).length && i < 12; i++) {
+          var s = msg.slots[i];
+          if (s.peerId && s.peerId !== myPeerId) {
+            slots[i].peerId = s.peerId;
+            slots[i].deviceInfo = s.deviceInfo;
+            slots[i].progress = s.progress;
+            slots[i].ready = s.ready;
+            slots[i].holding = s.holding;
+          }
+        }
+        if (msg.level) selectedLevel = msg.level;
+        determineHost();
+      }
+      else if (msg.type === 'lobby-ready') {
+        var si = findSlotByPeer(msg.peerId);
+        if (si >= 0) {
+          slots[si].ready = true;
+          slots[si].progress = 100;
+          slots[si].holding = false;
+          checkCountdownStart();
+        }
+      }
+      else if (msg.type === 'game-start') {
+        if (lobbyState !== 'observer') startGame(msg);
+      }
+      else if (msg.type === 'state') {
+        if (!isHost) {
+          // Update marbles from host state
+          if (msg.marbles) {
+            for (var i = 0; i < msg.marbles.length; i++) {
+              var ms = msg.marbles[i];
+              var m = playerMarbles[ms.peerId];
+              if (m) {
+                m.x = ms.x;
+                m.y = ms.y;
+                m.vx = ms.vx;
+                m.vy = ms.vy;
+                m.alive = ms.alive;
+              }
+            }
+          }
+        }
+      }
+      else if (msg.type === 'gameover') {
+        if (lobbyState === 'game') {
+          lobbyState = 'gameover';
+          gameOverTime = performance.now() / 1000;
+        }
+      }
+    }
+
+    function sendSignal(peerId, msg) {
+      if (sigSocket && sigSocket.readyState === WebSocket.OPEN) {
+        var envelope = Object.assign({}, msg, { peerId: peerId });
+        sigSocket.send(JSON.stringify(envelope));
+      }
+    }
+
+    function connectSignaling() {
+      var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var wsUrl = proto + '//' + location.host + '/gm1/api/signal/ws?peerId=' + myPeerId;
+      console.log('Connecting to signaling:', wsUrl);
+      hud.textContent = 'Connecting to signaling...';
+
+      sigSocket = new WebSocket(wsUrl);
+
+      sigSocket.onopen = function() {
+        console.log('Signaling WebSocket connected');
+        hud.textContent = 'Connected as ' + myPeerId.slice(0, 4);
+      };
+
+      sigSocket.onmessage = function(e) {
+        try {
+          var msg = JSON.parse(e.data);
+          handleSignalingMessage(msg);
+        } catch (err) {
+          console.error('Bad signaling message:', err);
+        }
+      };
+
+      sigSocket.onclose = function() {
+        console.log('Signaling WebSocket closed, reconnecting in 5s...');
+        sigSocket = null;
+        sigReconnectTimer = setTimeout(connectSignaling, 5000);
+      };
+
+      sigSocket.onerror = function(e) {
+        console.error('Signaling error:', e);
+      };
+    }
+
+    // ============================================================
+    // INPUT
+    // ============================================================
+    window.addEventListener('keydown', function(e) {
+      initAudio();
+      var isWasd = /[wasdWASD]/.test(e.key);
+      var isArrow = /Arrow|Space/.test(e.key);
+
+      if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+        if ((e.key === ' ' || e.key === 'Enter') && e.target === document.body) {
+          if (mySlotIndex < 0) {
+            p1Side = 'arrows';
+            startHold();
+          }
+          e.preventDefault();
+          return;
+        }
+        if (isWasd) {
+          if (mySlotIndex < 0) {
+            p1Side = 'wasd';
+            startHold();
+          } else if (p1Side === 'wasd') {
+            startHold();
+          } else {
+            startHoldP2();
+          }
+          e.preventDefault();
+          return;
+        }
+        if (e.key === 'ArrowLeft' && selectedLevel > 1) { selectedLevel--; e.preventDefault(); }
+        if (e.key === 'ArrowRight' && selectedLevel < 100) { selectedLevel++; e.preventDefault(); }
+      }
+      
+      if (lobbyState === 'game') {
+        if (e.key === 'ArrowLeft') keys.l = true;
+        if (e.key === 'ArrowRight') keys.r = true;
+        if (e.key === 'ArrowUp') keys.u = true;
+        if (e.key === 'ArrowDown') keys.d = true;
+        if (e.key === 'a' || e.key === 'A') keys2.l = true;
+        if (e.key === 'd' || e.key === 'D') keys2.r = true;
+        if (e.key === 'w' || e.key === 'W') keys2.u = true;
+        if (e.key === 's' || e.key === 'S') keys2.d = true;
+      }
+
+      if (e.key === 'Escape' || e.key === '`') {
+        if (lobbyState === 'game' || lobbyState === 'gameover') {
+          lobbyState = 'lobby';
+          mySlotIndex = -1;
+          cfg = null;
+          for (var i = 0; i < 12; i++) {
+            slots[i].peerId = null;
+            slots[i].ready = false;
+            slots[i].progress = 0;
+            slots[i].holding = false;
+          }
+        }
+      }
+    });
+
+    window.addEventListener('keyup', function(e) {
+      if (e.key === ' ' || e.key === 'Enter') {
+        if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+          releaseHold();
+          if (p1Side === 'wasd') releaseHoldP2();
+        }
+        if (lobbyState === 'gameover') {
+          if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
+            lobbyState = 'lobby';
+            mySlotIndex = -1;
+            cfg = null;
+          }
+        }
+      }
+      if (e.key === 'ArrowLeft') keys.l = false;
+      if (e.key === 'ArrowRight') keys.r = false;
+      if (e.key === 'ArrowUp') keys.u = false;
+      if (e.key === 'ArrowDown') keys.d = false;
+      if (e.key === 'a' || e.key === 'A') keys2.l = false;
+      if (e.key === 'd' || e.key === 'D') keys2.r = false;
+      if (e.key === 'w' || e.key === 'W') keys2.u = false;
+      if (e.key === 's' || e.key === 'S') keys2.d = false;
+    });
+
+    // ============================================================
+    // MAIN LOOP
+    // ============================================================
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    function gameLoop(now) {
+      if (!lastTime) lastTime = now;
+      var dt = (now - lastTime) / 1000;
+      lastTime = now;
+      if (dt > 0.05) dt = 0.05;
+      if (dt < 0.001) dt = 0.001;
+
+      if (lobbyState === 'lobby') {
+        updateHold(dt);
+        updateHoldP2(dt);
+        renderLobby();
+      } else if (lobbyState === 'countdown') {
+        updateCountdown(dt);
+        renderLobby();
+      } else if (lobbyState === 'game') {
+        gameTime += dt;
+
+        // Physics update
+        for (var i = 0; i < gameMarbles.length; i++) {
+          gameMarbles[i].update(dt, cfg);
+        }
+
+        // Host broadcasts state occasionally
+        if (isHost && Math.random() < 0.05) {
+          var marbleStates = gameMarbles.map(function(m) {
+            return { peerId: m.peerId, x: m.x, y: m.y, vx: m.vx, vy: m.vy, alive: m.alive };
+          });
+          broadcast({ type: 'state', marbles: marbleStates, gameTime: gameTime });
+        }
+
+        checkGameOver();
+        renderGame();
+      } else if (lobbyState === 'gameover') {
+        renderGame();
+        renderGameOver();
+      }
+
+      hud.textContent = BUILD + ' | ' + myPeerId.slice(0, 4) + ' | ' + (isHost ? 'HOST' : 'client') + ' | ' + lobbyState;
+      requestAnimationFrame(gameLoop);
+    }
+
+    // ============================================================
+    // INIT
+    // ============================================================
+    function init() {
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+      console.log('Marble Sadness initialized');
+      connectSignaling();
+      requestAnimationFrame(gameLoop);
+    }
+
+    init();
+  </script>
+</body>
 </html>
