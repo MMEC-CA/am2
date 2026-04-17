@@ -32,8 +32,8 @@
     var GW = 1920, GH = 1080;
 
     // Physics constants
-    var GRAV_ACCEL = -1470;
-    var FRICTION = 0.88;    // per-frame decay
+    var GRAV_ACCEL = 0;
+    var FRICTION = 0.95;    // per-frame decay
     var MARBLE_RADIUS = 8;
     var TABLE_MAX_WIDTH = 1600;
     var TABLE_MAX_HEIGHT = 900;
@@ -41,8 +41,9 @@
     var TABLE_MIN_HEIGHT = 340;
     var TABLE_WIDTH = 1600;
     var TABLE_HEIGHT = 900;
-    var TABLE_LEFT = (GW - TABLE_WIDTH) / 2;
-    var TABLE_TOP = (GH - TABLE_HEIGHT) / 2;
+    var TABLE_CENTER_X = GW / 2;
+    var TABLE_CENTER_Y = GH / 2;
+    var TABLE_RADIUS = Math.min(TABLE_WIDTH, TABLE_HEIGHT) * 0.45;
 
     var SLOT_COLORS = [
       { hex: '#ff0000', name: 'Red' },
@@ -89,8 +90,6 @@
     var myDeviceInfo = getDeviceInfo();
     var isHost = false;
     var hostPeerId = null;
-    var holdProgress = 0;
-    var holdProgressP2 = 0;
     var PLAYER_ACCEL = 1800;
     var MAX_PLAYER_SPEED = 1200;
     var AI_MARBLES = 3;
@@ -113,7 +112,8 @@
     var hasLocalPlayer2 = false;
     var localPlayer2PeerId = null;
     var localPlayer2SlotIndex = -1;
-    var p1Side = null;  // 'arrows' or 'wasd'
+    var holdingLeft = false, leftHoldStart = 0, leftProgress = 0;
+    var holdingRight = false, rightHoldStart = 0, rightProgress = 0;
 
     var canvas = document.getElementById('game');
     var ctx = canvas.getContext('2d');
@@ -152,13 +152,12 @@
     }
 
     function makeLevel(lv) {
-      var tilt = Math.min(20, lv * 0.5);  // table tilt angle in degrees
       return {
         level: lv,
-        tilt: tilt,
-        tiltRad: tilt * Math.PI / 180,
-        gravity: Math.sin(tilt * Math.PI / 180) * 9.8 * 100,
-        friction: 0.92 - lv * 0.002  // harder levels: more slippery
+        tilt: 0,
+        tiltRad: 0,
+        gravity: 0,
+        friction: Math.max(0.88, Math.min(0.96, 0.95 - lv * 0.001))
       };
     }
 
@@ -169,8 +168,10 @@
       this.peerId = peerId;
       this.color = color;
       this.slotIndex = slotIndex;
-      this.x = TABLE_LEFT + TABLE_WIDTH * 0.5 + (Math.random() - 0.5) * 200;
-      this.y = TABLE_TOP + TABLE_HEIGHT * 0.3;
+      var angle = Math.random() * Math.PI * 2;
+      var radius = TABLE_RADIUS * 0.3 * Math.sqrt(Math.random());
+      this.x = TABLE_CENTER_X + Math.cos(angle) * radius;
+      this.y = TABLE_CENTER_Y + Math.sin(angle) * radius;
       this.vx = 0;
       this.vy = 0;
       this.alive = true;
@@ -179,14 +180,7 @@
     Marble.prototype.update = function(dt, cfgData) {
       if (!this.alive) return;
       
-      // Apply gravity in direction of table tilt
-      var ax = Math.sin(cfgData.tiltRad) * 1500;
-      var ay = Math.cos(cfgData.tiltRad) * GRAV_ACCEL;
-      
-      this.vx += ax * dt;
-      this.vy += ay * dt;
-      
-      // Apply friction
+      // Apply slow arena friction and any control or AI forces
       this.vx *= cfgData.friction;
       this.vy *= cfgData.friction;
       
@@ -194,11 +188,10 @@
       this.x += this.vx * dt;
       this.y += this.vy * dt;
       
-      // Check if marble fell off table
-      if (this.x < TABLE_LEFT - this.radius * 2 || 
-          this.x > TABLE_LEFT + TABLE_WIDTH + this.radius * 2 ||
-          this.y < TABLE_TOP - this.radius * 2 ||
-          this.y > TABLE_TOP + TABLE_HEIGHT + this.radius * 2) {
+      // Check if marble fell off circular table
+      var dx = this.x - TABLE_CENTER_X;
+      var dy = this.y - TABLE_CENTER_Y;
+      if (Math.sqrt(dx * dx + dy * dy) > TABLE_RADIUS + this.radius) {
         this.alive = false;
         playTone(200, 0.1, 0.2);
       }
@@ -238,9 +231,9 @@
       if (!m.alive) return;
       var localKeys = null;
       if (m.peerId === myPeerId) {
-        localKeys = (p1Side === 'arrows') ? keys : keys2;
-      } else if (m.peerId === localPlayer2PeerId) {
         localKeys = keys2;
+      } else if (m.peerId === localPlayer2PeerId) {
+        localKeys = keys;
       }
       if (!localKeys) return;
       var ax = 0, ay = 0;
@@ -333,101 +326,96 @@
       return -1;
     }
 
-    function claimSlot() {
-      if (mySlotIndex >= 0) return;
+    function claimSlot(peerId, deviceInfo) {
       for (var i = 0; i < 12; i++) {
         if (slots[i].peerId === null) {
-          mySlotIndex = i;
-          slots[i].peerId = myPeerId;
-          slots[i].deviceInfo = myDeviceInfo;
+          slots[i].peerId = peerId;
+          slots[i].deviceInfo = deviceInfo;
+          slots[i].progress = 0;
+          slots[i].ready = false;
           broadcast({
             type: 'lobby-join',
-            peerId: myPeerId,
-            slotIndex: mySlotIndex,
-            deviceInfo: myDeviceInfo
+            peerId: peerId,
+            slotIndex: i,
+            deviceInfo: deviceInfo
           });
           determineHost();
-          return;
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    function startHoldLeft() {
+      if (lobbyState !== 'lobby' || holdingLeft) return;
+      holdingLeft = true;
+      leftHoldStart = performance.now();
+    }
+    function updateHoldLeft(dt) {
+      if (lobbyState !== 'lobby' || !holdingLeft) return;
+      var elapsed = (performance.now() - leftHoldStart) / 1000;
+      leftProgress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
+      if (mySlotIndex >= 0) {
+        slots[mySlotIndex].progress = leftProgress;
+      }
+      if (elapsed >= HOLD_DURATION) {
+        holdingLeft = false;
+        if (mySlotIndex < 0) {
+          mySlotIndex = claimSlot(myPeerId, myDeviceInfo);
+        }
+        if (mySlotIndex >= 0) {
+          slots[mySlotIndex].ready = true;
+          slots[mySlotIndex].progress = 100;
+          broadcast({ type: 'lobby-ready', peerId: myPeerId });
+          checkCountdownStart();
         }
       }
     }
+    function releaseHoldLeft() {
+      holdingLeft = false;
+      leftProgress = 0;
+      if (mySlotIndex >= 0 && !slots[mySlotIndex].ready) {
+        slots[mySlotIndex].progress = 0;
+      }
+    }
 
-    function claimLocalPlayer2() {
-      if (hasLocalPlayer2) return;
-      if (!(/Mac|Win|Linux/.test(navigator.userAgent))) return;
-      for (var i = 0; i < 12; i++) {
-        if (slots[i].peerId === null) {
-          localPlayer2PeerId = myPeerId + '-p2';
-          localPlayer2SlotIndex = i;
-          hasLocalPlayer2 = true;
-          slots[i].peerId = localPlayer2PeerId;
-          slots[i].deviceInfo = 'WASD (local)';
-          broadcast({
-            type: 'lobby-join',
-            peerId: localPlayer2PeerId,
-            slotIndex: localPlayer2SlotIndex,
-            deviceInfo: 'WASD (local)'
-          });
-          return;
+    function startHoldRight() {
+      if (lobbyState !== 'lobby' || holdingRight) return;
+      holdingRight = true;
+      rightHoldStart = performance.now();
+    }
+    function updateHoldRight(dt) {
+      if (lobbyState !== 'lobby' || !holdingRight) return;
+      var elapsed = (performance.now() - rightHoldStart) / 1000;
+      rightProgress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
+      if (localPlayer2SlotIndex >= 0) {
+        slots[localPlayer2SlotIndex].progress = rightProgress;
+      }
+      if (elapsed >= HOLD_DURATION) {
+        holdingRight = false;
+        if (!hasLocalPlayer2) {
+          var candidateId = myPeerId + '-p2';
+          var claimed = claimSlot(candidateId, 'Up arrow (local)');
+          if (claimed >= 0) {
+            localPlayer2PeerId = candidateId;
+            localPlayer2SlotIndex = claimed;
+            hasLocalPlayer2 = true;
+          }
+        }
+        if (hasLocalPlayer2 && localPlayer2SlotIndex >= 0) {
+          slots[localPlayer2SlotIndex].ready = true;
+          slots[localPlayer2SlotIndex].progress = 100;
+          broadcast({ type: 'lobby-ready', peerId: localPlayer2PeerId });
+          checkCountdownStart();
         }
       }
     }
-
-    var holdingFlap = false, holdStartTime = 0;
-    var HOLD_DURATION = 3.0;
-    function startHold() {
-      if (lobbyState !== 'lobby' || mySlotIndex >= 0) return;
-      holdingFlap = true;
-      holdStartTime = performance.now();
-    }
-    function updateHold(dt) {
-      if (lobbyState !== 'lobby' || !holdingFlap) return;
-      var elapsed = (performance.now() - holdStartTime) / 1000;
-      var progress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
-      if (mySlotIndex >= 0) {
-        slots[mySlotIndex].progress = progress;
-      } else {
-        holdProgress = progress;
+    function releaseHoldRight() {
+      holdingRight = false;
+      rightProgress = 0;
+      if (localPlayer2SlotIndex >= 0 && !slots[localPlayer2SlotIndex].ready) {
+        slots[localPlayer2SlotIndex].progress = 0;
       }
-      if (elapsed >= HOLD_DURATION) {
-        holdingFlap = false;
-        claimSlot();
-      }
-    }
-    function releaseHold() {
-      if (mySlotIndex >= 0) {
-        slots[mySlotIndex].ready = true;
-        slots[mySlotIndex].progress = 100;
-        broadcast({ type: 'lobby-ready', peerId: myPeerId });
-        checkCountdownStart();
-      }
-      holdingFlap = false;
-      holdProgress = 0;
-    }
-
-    var holdingFlapP2 = false, holdStartTimeP2 = 0;
-    function startHoldP2() {
-      if (lobbyState !== 'lobby' || mySlotIndex < 0) return;
-      if (!hasLocalPlayer2) claimLocalPlayer2();
-      if (!hasLocalPlayer2) return;
-      holdingFlapP2 = true;
-      holdStartTimeP2 = performance.now();
-    }
-    function updateHoldP2(dt) {
-      if (lobbyState !== 'lobby' || !holdingFlapP2 || !hasLocalPlayer2) return;
-      var elapsed = (performance.now() - holdStartTimeP2) / 1000;
-      var progress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
-      slots[localPlayer2SlotIndex].progress = progress;
-      if (elapsed >= HOLD_DURATION) {
-        holdingFlapP2 = false;
-        slots[localPlayer2SlotIndex].ready = true;
-        broadcast({ type: 'lobby-ready', peerId: localPlayer2PeerId });
-        checkCountdownStart();
-      }
-    }
-    function releaseHoldP2() {
-      holdingFlapP2 = false;
-      if (localPlayer2SlotIndex >= 0) slots[localPlayer2SlotIndex].progress = 0;
     }
 
     function checkCountdownStart() {
@@ -604,13 +592,21 @@
       ctx.fillStyle = '#888';
       ctx.font = Math.max(12, Math.min(18, GW / 70)) + 'px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('Hold SPACE or TAP to ready up', GW / 2, GH - 40);
-      if (holdingFlap && mySlotIndex < 0) {
+      ctx.fillText('Hold W for left player, UP arrow for right player', GW / 2, GH - 60);
+      ctx.fillText('Then use WASD / arrow keys in game', GW / 2, GH - 36);
+      if (holdingLeft) {
         ctx.fillStyle = '#0f0';
-        ctx.fillRect(GW / 2 - 180, GH - 30, 360 * holdProgress / 100, 16);
+        ctx.fillRect(GW / 2 - 180, GH - 30, 360 * leftProgress / 100, 16);
         ctx.strokeStyle = '#888';
         ctx.lineWidth = 2;
         ctx.strokeRect(GW / 2 - 180, GH - 30, 360, 16);
+      }
+      if (holdingRight) {
+        ctx.fillStyle = '#0ff';
+        ctx.fillRect(GW / 2 - 180, GH - 54, 360 * rightProgress / 100, 16);
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(GW / 2 - 180, GH - 54, 360, 16);
       }
     }
 
@@ -619,16 +615,15 @@
       ctx.fillRect(0, 0, GW, GH);
       
       // Draw table
-      ctx.save();
-      ctx.translate(TABLE_LEFT + TABLE_WIDTH / 2, TABLE_TOP + TABLE_HEIGHT / 2);
-      ctx.rotate(cfg.tiltRad);
-      ctx.translate(-(TABLE_WIDTH / 2), -(TABLE_HEIGHT / 2));
       ctx.fillStyle = '#4a4a2a';
-      ctx.fillRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
+      ctx.beginPath();
+      ctx.arc(TABLE_CENTER_X, TABLE_CENTER_Y, TABLE_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
       ctx.strokeStyle = '#fff';
       ctx.lineWidth = 3;
-      ctx.strokeRect(0, 0, TABLE_WIDTH, TABLE_HEIGHT);
-      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(TABLE_CENTER_X, TABLE_CENTER_Y, TABLE_RADIUS, 0, Math.PI * 2);
+      ctx.stroke();
       
       // Draw marbles
       for (var i = 0; i < gameMarbles.length; i++) {
@@ -989,23 +984,13 @@
       var isArrow = /Arrow|Space/.test(e.key);
 
       if (lobbyState === 'lobby' || lobbyState === 'countdown') {
-        if ((e.key === ' ' || e.key === 'Enter') && e.target === document.body) {
-          if (mySlotIndex < 0) {
-            p1Side = 'arrows';
-            startHold();
-          }
+        if (e.key === 'w' || e.key === 'W') {
+          if (!e.repeat) startHoldLeft();
           e.preventDefault();
           return;
         }
-        if (isWasd) {
-          if (mySlotIndex < 0) {
-            p1Side = 'wasd';
-            startHold();
-          } else if (p1Side === 'wasd') {
-            startHold();
-          } else {
-            startHoldP2();
-          }
+        if (e.key === 'ArrowUp') {
+          if (!e.repeat) startHoldRight();
           e.preventDefault();
           return;
         }
@@ -1040,11 +1025,17 @@
     });
 
     window.addEventListener('keyup', function(e) {
-      if (e.key === ' ' || e.key === 'Enter') {
+      if (e.key === 'w' || e.key === 'W') {
         if (lobbyState === 'lobby' || lobbyState === 'countdown') {
-          releaseHold();
-          if (p1Side === 'wasd') releaseHoldP2();
+          releaseHoldLeft();
         }
+      }
+      if (e.key === 'ArrowUp') {
+        if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+          releaseHoldRight();
+        }
+      }
+      if (e.key === ' ' || e.key === 'Enter') {
         if (lobbyState === 'gameover') {
           if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
             lobbyState = 'lobby';
@@ -1075,6 +1066,9 @@
       TABLE_HEIGHT = Math.max(TABLE_MIN_HEIGHT, Math.min(TABLE_MAX_HEIGHT, GH - 180));
       TABLE_LEFT = (GW - TABLE_WIDTH) / 2;
       TABLE_TOP = (GH - TABLE_HEIGHT) / 2;
+      TABLE_CENTER_X = GW * 0.5;
+      TABLE_CENTER_Y = GH * 0.5;
+      TABLE_RADIUS = Math.min(TABLE_WIDTH, TABLE_HEIGHT) * 0.45;
     }
 
     function gameLoop(now) {
