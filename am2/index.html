@@ -568,10 +568,31 @@
         ctx.lineWidth = 2;
         ctx.strokeRect(sx, sy, slotW - 10, slotH - 10);
         
-        // Ready progress bar
+        // Ready progress circle
         if (slot.progress > 0) {
-          ctx.fillStyle = '#0f0';
-          ctx.fillRect(sx + 5, sy + slotH - 25, (slotW - 20) * slot.progress / 100, 15);
+          var circleRadius = Math.min(slotW, slotH) * 0.3;
+          var circleX = sx + (slotW - 10) / 2;
+          var circleY = sy + (slotH - 10) / 2;
+          
+          // Background circle
+          ctx.strokeStyle = '#888';
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(circleX, circleY, circleRadius, 0, Math.PI * 2);
+          ctx.stroke();
+          
+          // Progress arc
+          ctx.strokeStyle = '#0f0';
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(circleX, circleY, circleRadius, -Math.PI / 2, -Math.PI / 2 + (slot.progress / 100) * Math.PI * 2);
+          ctx.stroke();
+          
+          // Center text
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold ' + Math.max(16, Math.min(24, circleRadius * 0.5)) + 'px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(Math.ceil(slot.progress) + '%', circleX, circleY + 6);
         }
         
         // Info
@@ -595,19 +616,12 @@
       ctx.textAlign = 'center';
       ctx.fillText('Hold W for left player, UP arrow for right player', GW / 2, GH - 60);
       ctx.fillText('Then use WASD / arrow keys in game', GW / 2, GH - 36);
-      if (holdingLeft) {
-        ctx.fillStyle = '#0f0';
-        ctx.fillRect(GW / 2 - 180, GH - 30, 360 * leftProgress / 100, 16);
-        ctx.strokeStyle = '#888';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(GW / 2 - 180, GH - 30, 360, 16);
-      }
-      if (holdingRight) {
+      
+      // Countdown display
+      if (lobbyState === 'countdown') {
         ctx.fillStyle = '#0ff';
-        ctx.fillRect(GW / 2 - 180, GH - 54, 360 * rightProgress / 100, 16);
-        ctx.strokeStyle = '#888';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(GW / 2 - 180, GH - 54, 360, 16);
+        ctx.font = 'bold 120px monospace';
+        ctx.fillText(Math.ceil(countdownTimer), GW / 2, GH / 2);
       }
     }
 
@@ -654,7 +668,7 @@
       if (winner) {
         ctx.fillText('WINNER!', GW / 2, GH / 2 - 50);
         ctx.fillStyle = winner.color;
-        ctx.fillText('Marble', GW / 2, GH / 2 + 50);
+        ctx.fillText(SLOT_COLORS[winner.slotIndex].name + ' Marble', GW / 2, GH / 2 + 50);
       } else {
         ctx.fillText('TIE!', GW / 2, GH / 2);
       }
