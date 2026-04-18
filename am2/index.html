@@ -1019,7 +1019,7 @@
       var isArrow = /Arrow|Space/.test(e.key);
       console.log('keydown:', e.key, 'lobbyState:', lobbyState, 'repeat:', e.repeat);
 
-      if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+      if (lobbyState === 'lobby') {
         if (e.key === 'w' || e.key === 'W') {
           if (!e.repeat) { console.log('startHoldLeft'); startHoldLeft(); }
           e.preventDefault();
@@ -1030,6 +1030,11 @@
           e.preventDefault();
           return;
         }
+        if (e.key === 'ArrowLeft' && selectedLevel > 1) { selectedLevel--; e.preventDefault(); }
+        if (e.key === 'ArrowRight' && selectedLevel < 100) { selectedLevel++; e.preventDefault(); }
+      }
+      
+      if (lobbyState === 'countdown') {
         if (e.key === 'ArrowLeft' && selectedLevel > 1) { selectedLevel--; e.preventDefault(); }
         if (e.key === 'ArrowRight' && selectedLevel < 100) { selectedLevel++; e.preventDefault(); }
       }
@@ -1062,12 +1067,12 @@
 
     window.addEventListener('keyup', function(e) {
       if (e.key === 'w' || e.key === 'W') {
-        if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+        if (lobbyState === 'lobby') {
           releaseHoldLeft();
         }
       }
       if (e.key === 'ArrowUp') {
-        if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+        if (lobbyState === 'lobby') {
           releaseHoldRight();
         }
       }
@@ -1076,7 +1081,19 @@
           if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
             lobbyState = 'lobby';
             mySlotIndex = -1;
+            localPlayer2SlotIndex = -1;
+            hasLocalPlayer2 = false;
+            localPlayer2PeerId = null;
             cfg = null;
+            // Clear all slots when returning to lobby
+            for (var i = 0; i < 12; i++) {
+              slots[i].peerId = null;
+              slots[i].ready = false;
+              slots[i].progress = 0;
+              slots[i].holding = false;
+            }
+            // Notify peers we're back in lobby
+            broadcast({ type: 'lobby-reset' });
           }
         }
       }
