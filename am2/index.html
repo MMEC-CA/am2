@@ -28,7 +28,7 @@
     //   - WebRTC for LAN multiplayer
     // ============================================================
 
-    var BUILD = 'v2026-04-18-a';
+    var BUILD = 'v2026-04-18-b';
     var GW = 1920, GH = 1080;
 
     // Physics constants
@@ -329,7 +329,10 @@
 
     function claimSlot(peerId, deviceInfo) {
       var existing = findSlotByPeer(peerId);
-      if (existing >= 0) return existing;
+      if (existing >= 0) {
+        console.log('claimSlot: existing slot for', peerId, '=>', existing);
+        return existing;
+      }
       for (var i = 0; i < 12; i++) {
         if (slots[i].peerId === null) {
           slots[i].peerId = peerId;
@@ -342,10 +345,12 @@
             slotIndex: i,
             deviceInfo: deviceInfo
           });
+          console.log('claimSlot: new slot for', peerId, '=>', i);
           determineHost();
           return i;
         }
       }
+      console.log('claimSlot: no free slot for', peerId);
       return -1;
     }
 
@@ -367,7 +372,10 @@
     }
 
     function startHoldLeft() {
-      if (lobbyState !== 'lobby' || holdingLeft) return;
+      if (lobbyState !== 'lobby' || holdingLeft) {
+        console.log('startHoldLeft blocked, lobbyState=', lobbyState, 'holdingLeft=', holdingLeft);
+        return;
+      }
       holdingLeft = true;
       leftHoldStart = performance.now();
       // Immediately claim a slot to show progress
@@ -408,7 +416,7 @@
     function startHoldRight() {
       console.log('startHoldRight called. lobbyState:', lobbyState, 'holdingRight:', holdingRight);
       if (lobbyState !== 'lobby' || holdingRight) { 
-        console.log('startHoldRight returning early');
+        console.log('startHoldRight blocked, lobbyState=', lobbyState, 'holdingRight=', holdingRight);
         return; 
       }
       console.log('startHoldRight: Setting holdingRight = true');
@@ -464,10 +472,12 @@
       for (var i = 0; i < 12; i++) {
         if (slots[i].ready) { anyReady = true; break; }
       }
+      console.log('checkCountdownStart: anyReady=', anyReady, 'current ready slots=', slots.filter(function(s){return s.ready;}).length);
       if (anyReady) {
         lobbyState = 'countdown';
         countdownStart = performance.now();
         countdownTimer = COUNTDOWN_DURATION;
+        console.log('countdown started for level', selectedLevel);
       }
     }
 
@@ -475,6 +485,7 @@
       if (lobbyState !== 'countdown') return;
       countdownTimer -= dt;
       if (countdownTimer <= 0) {
+        console.log('countdown finished, starting game');
         startGame({ level: selectedLevel });
       }
     }
@@ -496,6 +507,7 @@
     // GAME LOGIC
     // ============================================================
     function startGame(msg) {
+      console.log('startGame: level=', msg.level, 'isHost=', isHost, 'slotsReady=', slots.filter(function(s){return s.ready;}).length);
       lobbyState = 'game';
       cfg = makeLevel(msg.level);
       gameTime = 0;
@@ -546,6 +558,7 @@
     function checkGameOver() {
       if (lobbyState !== 'game') return;
       var aliveMarbles = gameMarbles.filter(function(m) { return m.alive; });
+      console.log('checkGameOver: alive=', aliveMarbles.length, 'total=', gameMarbles.length, 'lobbyState=', lobbyState);
       if (aliveMarbles.length <= 1) {
         lobbyState = 'gameover';
         gameOverTime = performance.now() / 1000;
@@ -948,6 +961,7 @@
         determineHost();
       }
       else if (msg.type === 'lobby-ready') {
+        console.log('received lobby-ready from', msg.peerId);
         var si = findSlotByPeer(msg.peerId);
         if (si >= 0) {
           slots[si].ready = true;
@@ -957,6 +971,7 @@
         }
       }
       else if (msg.type === 'lobby-reset') {
+        console.log('received lobby-reset');
         resetLobbyState();
       }
       else if (msg.type === 'game-start') {
