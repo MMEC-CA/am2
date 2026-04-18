@@ -28,7 +28,7 @@
     //   - WebRTC for LAN multiplayer
     // ============================================================
 
-    var BUILD = 'v2026-04-18-msa';
+    var BUILD = 'v2026-04-18-msc';
     var GW = 1920, GH = 1080;
 
     // Physics constants
@@ -328,6 +328,8 @@
     }
 
     function claimSlot(peerId, deviceInfo) {
+      var existing = findSlotByPeer(peerId);
+      if (existing >= 0) return existing;
       for (var i = 0; i < 12; i++) {
         if (slots[i].peerId === null) {
           slots[i].peerId = peerId;
@@ -345,6 +347,23 @@
         }
       }
       return -1;
+    }
+
+    function resetLobbyState() {
+      for (var i = 0; i < 12; i++) {
+        if (slots[i].peerId !== null) {
+          slots[i].progress = 0;
+          slots[i].ready = false;
+          slots[i].holding = false;
+        }
+      }
+      holdingLeft = false;
+      holdingRight = false;
+      leftProgress = 0;
+      rightProgress = 0;
+      leftHoldStart = 0;
+      rightHoldStart = 0;
+      countdownTimer = 0;
     }
 
     function startHoldLeft() {
@@ -937,6 +956,9 @@
           checkCountdownStart();
         }
       }
+      else if (msg.type === 'lobby-reset') {
+        resetLobbyState();
+      }
       else if (msg.type === 'game-start') {
         hostPeerId = msg.hostPeerId || hostPeerId;
         if (lobbyState !== 'observer' && lobbyState !== 'game') startGame(msg);
@@ -1053,14 +1075,9 @@
       if (e.key === 'Escape' || e.key === '`') {
         if (lobbyState === 'game' || lobbyState === 'gameover') {
           lobbyState = 'lobby';
-          mySlotIndex = -1;
           cfg = null;
-          for (var i = 0; i < 12; i++) {
-            slots[i].peerId = null;
-            slots[i].ready = false;
-            slots[i].progress = 0;
-            slots[i].holding = false;
-          }
+          resetLobbyState();
+          broadcast({ type: 'lobby-reset' });
         }
       }
     });
@@ -1080,19 +1097,8 @@
         if (lobbyState === 'gameover') {
           if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
             lobbyState = 'lobby';
-            mySlotIndex = -1;
-            localPlayer2SlotIndex = -1;
-            hasLocalPlayer2 = false;
-            localPlayer2PeerId = null;
             cfg = null;
-            // Clear all slots when returning to lobby
-            for (var i = 0; i < 12; i++) {
-              slots[i].peerId = null;
-              slots[i].ready = false;
-              slots[i].progress = 0;
-              slots[i].holding = false;
-            }
-            // Notify peers we're back in lobby
+            resetLobbyState();
             broadcast({ type: 'lobby-reset' });
           }
         }
