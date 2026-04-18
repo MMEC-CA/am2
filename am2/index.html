@@ -376,6 +376,7 @@
         console.log('startHoldLeft blocked, lobbyState=', lobbyState, 'holdingLeft=', holdingLeft);
         return;
       }
+      console.log('startHoldLeft: Setting holdingLeft = true');
       holdingLeft = true;
       leftHoldStart = performance.now();
       // Immediately claim a slot to show progress
@@ -391,6 +392,7 @@
       if (mySlotIndex >= 0) {
         slots[mySlotIndex].progress = leftProgress;
       }
+      if (leftProgress % 25 < dt * 100) console.log('holdLeft progress:', leftProgress.toFixed(1) + '%');
       if (elapsed >= HOLD_DURATION) {
         holdingLeft = false;
         if (mySlotIndex < 0) {
