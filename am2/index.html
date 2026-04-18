@@ -28,7 +28,7 @@
     //   - WebRTC for LAN multiplayer
     // ============================================================
 
-    var BUILD = 'v2026-04-18-b';
+    var BUILD = 'v2026-04-18-c';
     var GW = 1920, GH = 1080;
 
     // Physics constants
@@ -726,7 +726,8 @@
       if (winner) {
         ctx.fillText('WINNER!', GW / 2, GH / 2 - 50);
         ctx.fillStyle = winner.color;
-        ctx.fillText(SLOT_COLORS[winner.slotIndex].name + ' Marble', GW / 2, GH / 2 + 50);
+        var winnerName = winner.isAI ? 'ROBOT BALL' : SLOT_COLORS[winner.slotIndex].name + ' Marble';
+        ctx.fillText(winnerName, GW / 2, GH / 2 + 50);
       } else {
         ctx.fillText('TIE!', GW / 2, GH / 2);
       }
