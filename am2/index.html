@@ -351,6 +351,11 @@
       if (lobbyState !== 'lobby' || holdingLeft) return;
       holdingLeft = true;
       leftHoldStart = performance.now();
+      // Immediately claim a slot to show progress
+      if (mySlotIndex < 0) {
+        mySlotIndex = claimSlot(myPeerId, myDeviceInfo);
+        console.log('Left hold started, claimed slot:', mySlotIndex);
+      }
     }
     function updateHoldLeft(dt) {
       if (lobbyState !== 'lobby' || !holdingLeft) return;
@@ -376,6 +381,7 @@
       holdingLeft = false;
       leftProgress = 0;
       if (mySlotIndex >= 0 && !slots[mySlotIndex].ready) {
+        // Reset slot progress if hold was interrupted before reaching 3 seconds
         slots[mySlotIndex].progress = 0;
       }
     }
@@ -389,6 +395,11 @@
       console.log('startHoldRight: Setting holdingRight = true');
       holdingRight = true;
       rightHoldStart = performance.now();
+      // Immediately claim a slot to show progress
+      if (localPlayer2SlotIndex < 0) {
+        localPlayer2SlotIndex = claimSlot(myPeerId + '-p2', 'Up arrow (local)');
+        console.log('Right hold started, claimed slot:', localPlayer2SlotIndex);
+      }
     }
     function updateHoldRight(dt) {
       if (lobbyState !== 'lobby' || !holdingRight) return;
@@ -423,6 +434,7 @@
       holdingRight = false;
       rightProgress = 0;
       if (localPlayer2SlotIndex >= 0 && !slots[localPlayer2SlotIndex].ready) {
+        // Reset slot progress if hold was interrupted before reaching 3 seconds
         slots[localPlayer2SlotIndex].progress = 0;
       }
     }
