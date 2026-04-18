@@ -413,6 +413,7 @@
         // Reset slot progress if hold was interrupted before reaching 3 seconds
         slots[mySlotIndex].progress = 0;
       }
+      checkCountdownStart();
     }
 
     function startHoldRight() {
@@ -466,16 +467,19 @@
         // Reset slot progress if hold was interrupted before reaching 3 seconds
         slots[localPlayer2SlotIndex].progress = 0;
       }
+      checkCountdownStart();
     }
 
     function checkCountdownStart() {
       if (lobbyState !== 'lobby') return;
       var anyReady = false;
+      var anyHoldingIncomplete = false;
       for (var i = 0; i < 12; i++) {
-        if (slots[i].ready) { anyReady = true; break; }
+        if (slots[i].ready) { anyReady = true; }
+        if (slots[i].progress > 0 && !slots[i].ready) { anyHoldingIncomplete = true; }
       }
-      console.log('checkCountdownStart: anyReady=', anyReady, 'current ready slots=', slots.filter(function(s){return s.ready;}).length);
-      if (anyReady) {
+      console.log('checkCountdownStart: anyReady=', anyReady, 'anyHoldingIncomplete=', anyHoldingIncomplete, 'current ready slots=', slots.filter(function(s){return s.ready;}).length);
+      if (anyReady && !anyHoldingIncomplete) {
         lobbyState = 'countdown';
         countdownStart = performance.now();
         countdownTimer = COUNTDOWN_DURATION;
