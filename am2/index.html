@@ -381,7 +381,12 @@
     }
 
     function startHoldRight() {
-      if (lobbyState !== 'lobby' || holdingRight) return;
+      console.log('startHoldRight called. lobbyState:', lobbyState, 'holdingRight:', holdingRight);
+      if (lobbyState !== 'lobby' || holdingRight) { 
+        console.log('startHoldRight returning early');
+        return; 
+      }
+      console.log('startHoldRight: Setting holdingRight = true');
       holdingRight = true;
       rightHoldStart = performance.now();
     }
@@ -392,7 +397,9 @@
       if (localPlayer2SlotIndex >= 0) {
         slots[localPlayer2SlotIndex].progress = rightProgress;
       }
+      if (rightProgress % 25 < dt * 100) console.log('holdRight progress:', rightProgress.toFixed(1) + '%');
       if (elapsed >= HOLD_DURATION) {
+        console.log('Hold duration reached! Claiming slot...');
         holdingRight = false;
         if (!hasLocalPlayer2) {
           var candidateId = myPeerId + '-p2';
@@ -401,6 +408,7 @@
             localPlayer2PeerId = candidateId;
             localPlayer2SlotIndex = claimed;
             hasLocalPlayer2 = true;
+            console.log('Claimed slot:', claimed);
           }
         }
         if (hasLocalPlayer2 && localPlayer2SlotIndex >= 0) {
@@ -997,15 +1005,16 @@
       initAudio();
       var isWasd = /[wasdWASD]/.test(e.key);
       var isArrow = /Arrow|Space/.test(e.key);
+      console.log('keydown:', e.key, 'lobbyState:', lobbyState, 'repeat:', e.repeat);
 
       if (lobbyState === 'lobby' || lobbyState === 'countdown') {
         if (e.key === 'w' || e.key === 'W') {
-          if (!e.repeat) startHoldLeft();
+          if (!e.repeat) { console.log('startHoldLeft'); startHoldLeft(); }
           e.preventDefault();
           return;
         }
         if (e.key === 'ArrowUp') {
-          if (!e.repeat) startHoldRight();
+          if (!e.repeat) { console.log('startHoldRight called'); startHoldRight(); }
           e.preventDefault();
           return;
         }
@@ -1087,7 +1096,7 @@
     }
 
     function gameLoop(now) {
-      if (!lastTime) lastTime = now;
+      if (!lastTime) { lastTime = now; console.log('gameLoop started'); }
       var dt = (now - lastTime) / 1000;
       lastTime = now;
       if (dt > 0.05) dt = 0.05;
