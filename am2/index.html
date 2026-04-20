@@ -716,10 +716,39 @@
     function renderGameOver() {
       ctx.fillStyle = 'rgba(0,0,0,0.7)';
       ctx.fillRect(0, 0, GW, GH);
-      
+
+      var elapsed = performance.now() / 1000 - gameOverTime;
+      var progress = Math.min(1, elapsed / GAME_OVER_LOCKOUT);
+      var startAngle = -Math.PI / 2;
+      var endAngle = startAngle + progress * Math.PI * 2;
+      var arcR = TABLE_RADIUS + 12;
+
+      // Dim track
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.arc(TABLE_CENTER_X, TABLE_CENTER_Y, arcR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Glowing fill arc
+      ctx.strokeStyle = 'rgba(0,255,255,0.25)';
+      ctx.lineWidth = 14;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(TABLE_CENTER_X, TABLE_CENTER_Y, arcR, startAngle, endAngle);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#0ff';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(TABLE_CENTER_X, TABLE_CENTER_Y, arcR, startAngle, endAngle);
+      ctx.stroke();
+
+      ctx.lineCap = 'butt';
+
       var aliveMarbles = gameMarbles.filter(function(m) { return m.alive; });
       var winner = aliveMarbles.length === 1 ? aliveMarbles[0] : null;
-      
+
       ctx.fillStyle = '#0ff';
       ctx.font = 'bold 80px monospace';
       ctx.textAlign = 'center';
@@ -731,10 +760,10 @@
       } else {
         ctx.fillText('TIE!', GW / 2, GH / 2);
       }
-      
+
       ctx.fillStyle = '#888';
       ctx.font = '24px monospace';
-      if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
+      if (progress >= 1) {
         ctx.fillText('SPACE to return to lobby', GW / 2, GH / 2 + 150);
       }
     }
